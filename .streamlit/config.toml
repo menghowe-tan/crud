@@ -1,6 +1,20 @@
 [server]
 maxUploadSize = 10
 
+# "Half-life" theme — a cool archival palette where teal = alive, amber = expiring,
+# rust = expired. Fonts load straight from Google Fonts via the {name}:{url} form, so
+# the same families are available to the hand-built card HTML in app.py.
 [theme]
 base = "light"
-primaryColor = "#2563EB"
+primaryColor = "#0E7C6B"
+backgroundColor = "#E9ECE6"
+secondaryBackgroundColor = "#FCFDFB"
+textColor = "#1E241E"
+linkColor = "#0E7C6B"
+borderColor = "#D3D9CF"
+baseRadius = "small"
+showWidgetBorder = true
+baseFontSize = 15
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+headingFont = "'Space Grotesk':https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
