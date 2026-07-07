@@ -58,6 +58,21 @@ def attachment_html(item: dict, status: str) -> str:
             f'📎 {html.escape(item["file_name"] or "attachment")}</div>')
 
 
+def triage_html(item: dict) -> str:
+    if not item["triage"]:
+        return ""
+    when = ""
+    if item["triaged_at"]:
+        when = datetime.fromisoformat(item["triaged_at"]).astimezone().strftime("%d %b %H:%M")
+    return (f'<div style="margin-top:0.75rem; padding:0.5rem 0.75rem;'
+            f' background:rgba(37,99,235,0.07); border-left:3px solid #2563EB;'
+            f' border-radius:6px; font-size:0.85rem;">'
+            f'<div style="font-weight:600; color:#2563EB;'
+            f' margin-bottom:0.25rem;">🤖 Triage · {when}</div>'
+            f'<div style="white-space:pre-wrap; word-break:break-word;">'
+            f'{html.escape(item["triage"])}</div></div>')
+
+
 def render_card(item: dict, status: str, now: datetime) -> None:
     bg, border, text, badge_fg, badge_bg = CARD_STYLES[status]
     created = datetime.fromisoformat(item["created_at"]).astimezone().strftime("%d %b %Y %H:%M")
@@ -71,6 +86,7 @@ def render_card(item: dict, status: str, now: datetime) -> None:
                     padding:1rem; margin-bottom:0.25rem; color:{text};">
           {content_html}
           {attachment_html(item, status)}
+          {triage_html(item)}
           <div style="display:flex; justify-content:space-between; align-items:center;
                       margin-top:0.75rem; font-size:0.8rem; color:#64748B;">
             <span>created {created} · {expiry_label(item, now)}</span>

@@ -1,24 +1,25 @@
 """Triage agent: reads the pastebin items and figures out how to process them.
 
 Runs standalone against the same database as the app (PASTEBIN_DB / items.db).
-It never modifies existing items; it prints a per-item triage report with
-recommended processing actions and saves the report back into the pastebin as a
-new item (1-day expiry) so it shows up in the app's display. Past reports are
-never re-triaged.
+Each item's triage result (summary + recommended processing) is stored on that
+item's own row (`triage` / `triaged_at` columns) and shown on its card in the
+app. Items are triaged once: anything that already has a triage note is skipped
+on later runs.
 
 Usage:
-    .venv/bin/python agent.py             # analyze unprocessed items
-    .venv/bin/python agent.py --all       # include processed items
-    .venv/bin/python agent.py --item 3    # analyze one item by id
-    .venv/bin/python agent.py --no-save   # print only, don't save to the pastebin
+    .venv/bin/python agent.py             # triage unprocessed, un-triaged items
+    .venv/bin/python agent.py --all       # also include processed items
+    .venv/bin/python agent.py --item 3    # one item by id (re-triages it)
+    .venv/bin/python agent.py --no-save   # print only, don't store on the items
 
 Auth: uses ANTHROPIC_API_KEY or an `ant auth login` profile.
 """
 
 import argparse
 import base64
+import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import anthropic
 
@@ -27,8 +28,6 @@ import db
 MODEL = "claude-opus-4-8"
 MAX_IMAGE_BYTES = 5 * 1024 * 1024  # API limit per image
 MAX_TEXT_ATTACHMENT_CHARS = 20_000
-REPORT_PREFIX = "📋 Triage report"
-REPORT_TTL = timedelta(days=1)
 
 SYSTEM = """You are the triage agent for a personal pastebin app. Items hold temporary
 information: text notes, URLs, and file attachments (images or documents). Items expire
@@ -40,17 +39,45 @@ Your job: for each item, figure out how it should be processed.
 For every item:
 1. Identify what it is. If the content is or contains a URL, fetch it to see what it
    actually points to. Images are provided inline — look at them.
-2. Summarize in 1-3 sentences what it actually contains.
+2. Write a 1-3 sentence summary of what it actually contains, grounded in what you
+   fetched or saw. Say plainly when a URL could not be fetched.
 3. Recommend concrete processing action(s) and why — e.g. bookmark or archive the link,
    extract key information, save the attachment somewhere permanent, follow up on a task
    it implies, safe to mark processed, safe to delete.
 
-Then finish with a short overall section: patterns across items, anything that expired
-unprocessed, and what the user should do first.
+Also write a short overall note: patterns across items, anything that expired
+unprocessed, and what the user should do first."""
 
-Format the whole answer as a markdown report with one section per item
-("## Item <id> — <short title>"). Be specific and grounded in what you actually
-fetched or saw; say so plainly when a URL could not be fetched."""
+REPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer"},
+                    "summary": {
+                        "type": "string",
+                        "description": "1-3 sentences on what the item actually contains",
+                    },
+                    "recommendation": {
+                        "type": "string",
+                        "description": "Concrete processing action(s) and why",
+                    },
+                },
+                "required": ["item_id", "summary", "recommendation"],
+                "additionalProperties": False,
+            },
+        },
+        "overall": {
+            "type": "string",
+            "description": "Cross-item observations and what the user should do first",
+        },
+    },
+    "required": ["items", "overall"],
+    "additionalProperties": False,
+}
 
 
 def fmt_ts(iso: str) -> str:
@@ -110,28 +137,25 @@ def build_user_content(items: list[dict], now: datetime) -> list[dict]:
     return content
 
 
-def is_report(item: dict) -> bool:
-    return item["content"].startswith(REPORT_PREFIX)
-
-
 def triage_candidates(items: list[dict], include_processed: bool = False,
                       item_id: int | None = None) -> list[dict]:
-    """Items the agent should look at — never its own past reports."""
-    items = [item for item in items if not is_report(item)]
+    """Items the agent should look at. Each item is triaged only once —
+    already-triaged items are skipped unless requested explicitly via item_id."""
     if item_id is not None:
         return [item for item in items if item["id"] == item_id]
+    items = [item for item in items if item["triage"] is None]
     if not include_processed:
         items = [item for item in items if not item["processed"]]
     return items
 
 
-def save_report(report: str, now: datetime) -> int:
-    """Store the report as a pastebin item so it shows up in the app."""
-    title = f"{REPORT_PREFIX} — {now.strftime('%Y-%m-%d %H:%M UTC')}"
-    return db.create_item(f"{title}\n\n{report.strip()}", now + REPORT_TTL)
+def triage_text(entry: dict) -> str:
+    """The note stored on the item row and shown on its card."""
+    return f"{entry['summary'].strip()}\n\nRecommended: {entry['recommendation'].strip()}"
 
 
-def run(items: list[dict], now: datetime, model: str = MODEL) -> str:
+def run(items: list[dict], now: datetime, model: str = MODEL) -> dict:
+    """Ask the model to triage the items; returns {'items': [...], 'overall': str}."""
     try:
         client = anthropic.Anthropic()
     except anthropic.AnthropicError as exc:
@@ -142,7 +166,7 @@ def run(items: list[dict], now: datetime, model: str = MODEL) -> str:
     ]
     user_content = build_user_content(items, now)
     messages = [{"role": "user", "content": user_content}]
-    report_parts: list[str] = []
+    print(f"Triaging {len(items)} item(s) with {model}…", file=sys.stderr)
 
     while True:
         try:
@@ -152,11 +176,10 @@ def run(items: list[dict], now: datetime, model: str = MODEL) -> str:
                 thinking={"type": "adaptive"},
                 system=SYSTEM,
                 tools=tools,
+                output_config={"format": {"type": "json_schema",
+                                          "schema": REPORT_SCHEMA}},
                 messages=messages,
             ) as stream:
-                for text in stream.text_stream:
-                    print(text, end="", flush=True)
-                    report_parts.append(text)
                 response = stream.get_final_message()
         except anthropic.AuthenticationError:
             sys.exit("Invalid Anthropic API credentials.")
@@ -174,11 +197,15 @@ def run(items: list[dict], now: datetime, model: str = MODEL) -> str:
             ]
             continue
         if response.stop_reason == "refusal":
-            print("\n[The model declined to analyze these items.]", file=sys.stderr)
-        elif response.stop_reason == "max_tokens":
-            print("\n[Report truncated at the output-token limit.]", file=sys.stderr)
-        print()
-        return "".join(report_parts)
+            sys.exit("The model declined to analyze these items.")
+        if response.stop_reason == "max_tokens":
+            sys.exit("Output hit the token limit before the report was complete.")
+
+        text = "".join(b.text for b in response.content if b.type == "text")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            sys.exit(f"Could not parse the model's report as JSON:\n{text}")
 
 
 def main() -> None:
@@ -186,10 +213,10 @@ def main() -> None:
     parser.add_argument("--all", action="store_true",
                         help="include items already marked processed")
     parser.add_argument("--item", type=int, metavar="ID",
-                        help="analyze a single item by id")
+                        help="triage a single item by id, even if already triaged")
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--no-save", action="store_true",
-                        help="print the report only; don't save it to the pastebin")
+                        help="print the report only; don't store triage on the items")
     args = parser.parse_args()
 
     db.init_db()
@@ -198,15 +225,25 @@ def main() -> None:
                               item_id=args.item)
     if not items:
         if args.item is not None:
-            sys.exit(f"No triageable item with id {args.item}.")
-        print("No items to triage.")
+            sys.exit(f"No item with id {args.item}.")
+        print("No items to triage (all remaining items are already triaged).")
         return
 
     report = run(items, now, model=args.model)
-    if report.strip() and not args.no_save:
-        item_id = save_report(report, db.now_utc())
-        print(f"\nSaved report to the pastebin (item {item_id}, "
-              f"expires in {REPORT_TTL.days} day).", file=sys.stderr)
+
+    valid_ids = {item["id"] for item in items}
+    saved = 0
+    for entry in report.get("items", []):
+        if entry["item_id"] not in valid_ids:
+            continue
+        print(f"## Item {entry['item_id']}\n{triage_text(entry)}\n")
+        if not args.no_save:
+            db.set_triage(entry["item_id"], triage_text(entry))
+            saved += 1
+    print(f"## Overall\n{report.get('overall', '').strip()}")
+    if saved:
+        print(f"\nStored triage notes on {saved} item(s) — visible on their cards "
+              f"in the app.", file=sys.stderr)
 
 
 if __name__ == "__main__":

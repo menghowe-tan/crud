@@ -73,6 +73,19 @@ def test_set_and_remove_attachment():
     assert db.get_item(item_id)["file_data"] is None
 
 
+def test_set_triage_roundtrip_and_clear():
+    item_id = make_item()
+    assert db.get_item(item_id)["triage"] is None
+    db.set_triage(item_id, "A link.\n\nRecommended: bookmark it.")
+    item = db.get_item(item_id)
+    assert item["triage"] == "A link.\n\nRecommended: bookmark it."
+    assert item["triaged_at"] is not None
+    db.set_triage(item_id, None)
+    item = db.get_item(item_id)
+    assert item["triage"] is None
+    assert item["triaged_at"] is None
+
+
 def test_init_db_migrates_pre_attachment_schema(tmp_path, monkeypatch):
     path = tmp_path / "old.db"
     monkeypatch.setenv("PASTEBIN_DB", str(path))
@@ -87,7 +100,9 @@ def test_init_db_migrates_pre_attachment_schema(tmp_path, monkeypatch):
     db.init_db()
     item_id = db.create_item("migrated", db.now_utc() + timedelta(hours=1),
                              file_name="a.txt", file_type="text/plain", file_data=b"hi")
-    assert db.get_item(item_id)["file_data"] == b"hi"
+    item = db.get_item(item_id)
+    assert item["file_data"] == b"hi"
+    assert item["triage"] is None  # triage columns migrated in too
 
 
 def test_is_expired():

@@ -18,11 +18,17 @@ CREATE TABLE IF NOT EXISTS items (
     processed INTEGER NOT NULL DEFAULT 0,
     file_name TEXT,
     file_type TEXT,
-    file_data BLOB
+    file_data BLOB,
+    triage TEXT,
+    triaged_at TEXT
 );
 """
 
-_ATTACHMENT_COLUMNS = (("file_name", "TEXT"), ("file_type", "TEXT"), ("file_data", "BLOB"))
+# Columns added after the initial schema; init_db() backfills them via ALTER TABLE.
+_MIGRATED_COLUMNS = (
+    ("file_name", "TEXT"), ("file_type", "TEXT"), ("file_data", "BLOB"),
+    ("triage", "TEXT"), ("triaged_at", "TEXT"),
+)
 
 
 def _db_path() -> str:
@@ -42,9 +48,9 @@ def now_utc() -> datetime:
 def init_db() -> None:
     with _connect() as conn:
         conn.execute(_SCHEMA)
-        # Migrate databases created before attachments existed.
+        # Migrate databases created before newer columns existed.
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
-        for name, decl in _ATTACHMENT_COLUMNS:
+        for name, decl in _MIGRATED_COLUMNS:
             if name not in cols:
                 conn.execute(f"ALTER TABLE items ADD COLUMN {name} {decl}")
 
@@ -98,6 +104,15 @@ def set_attachment(
         conn.execute(
             "UPDATE items SET file_name = ?, file_type = ?, file_data = ? WHERE id = ?",
             (file_name, file_type, file_data, item_id),
+        )
+
+
+def set_triage(item_id: int, text: str | None) -> None:
+    """Store the agent's triage note on the item; pass None to clear it."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE items SET triage = ?, triaged_at = ? WHERE id = ?",
+            (text, now_utc().isoformat() if text is not None else None, item_id),
         )
 
 
