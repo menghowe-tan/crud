@@ -31,15 +31,6 @@ def _init() -> bool:
     return True
 
 
-def status_of(item: dict, now: datetime) -> str:
-    """Processed wins over expired; otherwise expired wins over active."""
-    if item["processed"]:
-        return "Processed"
-    if db.is_expired(item, now):
-        return "Expired"
-    return "Active"
-
-
 def humanize(delta: timedelta) -> str:
     seconds = int(abs(delta.total_seconds()))
     for unit, size in (("d", 86400), ("h", 3600), ("min", 60)):
@@ -154,7 +145,7 @@ def main() -> None:
     selected = st.pills("Filter", STATUSES, selection_mode="multi", default=STATUSES)
 
     now = db.now_utc()
-    items = [(item, status_of(item, now)) for item in db.get_items()]
+    items = [(item, db.status_of(item, now)) for item in db.get_items()]
     visible = [(item, status) for item, status in items if status in selected]
 
     if not items:
@@ -182,4 +173,5 @@ def main() -> None:
                                     key=f"dl-{item['id']}")
 
 
-main()
+if __name__ == "__main__":
+    main()

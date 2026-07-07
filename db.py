@@ -117,3 +117,12 @@ def delete_item(item_id: int) -> None:
 def is_expired(item: dict, now: datetime | None = None) -> bool:
     now = now or now_utc()
     return datetime.fromisoformat(item["expires_at"]) < now
+
+
+def status_of(item: dict, now: datetime | None = None) -> str:
+    """Derived status. Processed wins over expired; expired wins over active."""
+    if item["processed"]:
+        return "Processed"
+    if is_expired(item, now):
+        return "Expired"
+    return "Active"

@@ -20,14 +20,21 @@ python3 -m venv .venv
 .venv/bin/pytest
 # Single test
 .venv/bin/pytest tests/test_db.py::test_update_item
+
+# Run the triage agent (read-only analysis of stored items; needs ANTHROPIC_API_KEY
+# or an `ant auth login` profile)
+.venv/bin/python agent.py            # unprocessed items
+.venv/bin/python agent.py --all      # include processed
+.venv/bin/python agent.py --item 3   # one item
 ```
 
 ## Architecture
 
-Two-layer split:
+Three entry points over one data layer:
 
 - `db.py` — SQLite data layer (stdlib `sqlite3`). Database file is `items.db`, overridable via the `PASTEBIN_DB` env var (tests point it at a temp file, re-read on every connect). Timestamps are stored as ISO-8601 UTC strings. Attachments live as BLOBs on the items row (`file_name`/`file_type`/`file_data`, all nullable — an item needs text or a file, enforced in the UI). `init_db()` migrates pre-attachment databases via `ALTER TABLE`; follow that pattern for future schema changes.
-- `app.py` — Streamlit UI. Item **status is derived, not stored**: `processed` flag and `expires_at` vs now produce Active / Expired / Processed, so filtering happens in Python after `db.get_items()`, not in SQL.
+- `app.py` — Streamlit UI. Item **status is derived, not stored**: `db.status_of()` combines the `processed` flag and `expires_at` vs now into Active / Expired / Processed, so filtering happens in Python after `db.get_items()`, not in SQL. `main()` is guarded by `if __name__ == "__main__"` so importing `app` has no side effects.
+- `agent.py` — standalone triage agent (Anthropic SDK, Claude Opus + adaptive thinking + server-side web_fetch/web_search). Reads items via `db`, sends text/URLs/inline images to the model, prints a markdown report of how to process each item. Strictly read-only against the DB. Handles `pause_turn` (server-tool loop) by resending; must not import `app` (that would pull in Streamlit).
 
 Item lifecycle: items expire by timestamp but are **never auto-deleted** — expiry only changes their display; deletion is manual. Processed is a user toggle.
 
