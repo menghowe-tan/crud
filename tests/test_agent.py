@@ -67,6 +67,34 @@ def test_binary_attachment_metadata_only():
     assert "report.pdf" in blocks[1]["text"]
 
 
+def test_triage_candidates_skips_processed_and_reports():
+    plain = db.create_item("note", db.now_utc() + timedelta(hours=1))
+    done = db.create_item("done", db.now_utc() + timedelta(hours=1))
+    db.set_processed(done, True)
+    agent.save_report("nothing to do", db.now_utc())
+
+    ids = [i["id"] for i in agent.triage_candidates(db.get_items())]
+    assert ids == [plain]
+    ids_all = [i["id"] for i in agent.triage_candidates(db.get_items(),
+                                                        include_processed=True)]
+    assert sorted(ids_all) == sorted([plain, done])
+
+
+def test_triage_candidates_single_item_never_a_report():
+    report_id = agent.save_report("some findings", db.now_utc())
+    assert agent.triage_candidates(db.get_items(), item_id=report_id) == []
+
+
+def test_save_report_creates_pastebin_item():
+    now = db.now_utc()
+    item_id = agent.save_report("## Item 1\nBookmark it.", now)
+    item = db.get_item(item_id)
+    assert item["content"].startswith(agent.REPORT_PREFIX)
+    assert "Bookmark it." in item["content"]
+    assert item["expires_at"] == (now + agent.REPORT_TTL).isoformat()
+    assert db.status_of(item, now) == "Active"
+
+
 def test_build_user_content_covers_all_items():
     first = db.create_item("one", db.now_utc() + timedelta(hours=1))
     second = db.create_item("two", db.now_utc() + timedelta(hours=1))

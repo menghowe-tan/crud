@@ -1,13 +1,16 @@
 """Triage agent: reads the pastebin items and figures out how to process them.
 
 Runs standalone against the same database as the app (PASTEBIN_DB / items.db).
-Read-only — it never modifies items; it prints a per-item triage report with
-recommended processing actions.
+It never modifies existing items; it prints a per-item triage report with
+recommended processing actions and saves the report back into the pastebin as a
+new item (1-day expiry) so it shows up in the app's display. Past reports are
+never re-triaged.
 
 Usage:
     .venv/bin/python agent.py             # analyze unprocessed items
     .venv/bin/python agent.py --all       # include processed items
     .venv/bin/python agent.py --item 3    # analyze one item by id
+    .venv/bin/python agent.py --no-save   # print only, don't save to the pastebin
 
 Auth: uses ANTHROPIC_API_KEY or an `ant auth login` profile.
 """
@@ -15,7 +18,7 @@ Auth: uses ANTHROPIC_API_KEY or an `ant auth login` profile.
 import argparse
 import base64
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import anthropic
 
@@ -24,6 +27,8 @@ import db
 MODEL = "claude-opus-4-8"
 MAX_IMAGE_BYTES = 5 * 1024 * 1024  # API limit per image
 MAX_TEXT_ATTACHMENT_CHARS = 20_000
+REPORT_PREFIX = "📋 Triage report"
+REPORT_TTL = timedelta(days=1)
 
 SYSTEM = """You are the triage agent for a personal pastebin app. Items hold temporary
 information: text notes, URLs, and file attachments (images or documents). Items expire
@@ -105,7 +110,28 @@ def build_user_content(items: list[dict], now: datetime) -> list[dict]:
     return content
 
 
-def run(items: list[dict], now: datetime, model: str = MODEL) -> None:
+def is_report(item: dict) -> bool:
+    return item["content"].startswith(REPORT_PREFIX)
+
+
+def triage_candidates(items: list[dict], include_processed: bool = False,
+                      item_id: int | None = None) -> list[dict]:
+    """Items the agent should look at — never its own past reports."""
+    items = [item for item in items if not is_report(item)]
+    if item_id is not None:
+        return [item for item in items if item["id"] == item_id]
+    if not include_processed:
+        items = [item for item in items if not item["processed"]]
+    return items
+
+
+def save_report(report: str, now: datetime) -> int:
+    """Store the report as a pastebin item so it shows up in the app."""
+    title = f"{REPORT_PREFIX} — {now.strftime('%Y-%m-%d %H:%M UTC')}"
+    return db.create_item(f"{title}\n\n{report.strip()}", now + REPORT_TTL)
+
+
+def run(items: list[dict], now: datetime, model: str = MODEL) -> str:
     try:
         client = anthropic.Anthropic()
     except anthropic.AnthropicError as exc:
@@ -116,6 +142,7 @@ def run(items: list[dict], now: datetime, model: str = MODEL) -> None:
     ]
     user_content = build_user_content(items, now)
     messages = [{"role": "user", "content": user_content}]
+    report_parts: list[str] = []
 
     while True:
         try:
@@ -129,6 +156,7 @@ def run(items: list[dict], now: datetime, model: str = MODEL) -> None:
             ) as stream:
                 for text in stream.text_stream:
                     print(text, end="", flush=True)
+                    report_parts.append(text)
                 response = stream.get_final_message()
         except anthropic.AuthenticationError:
             sys.exit("Invalid Anthropic API credentials.")
@@ -150,7 +178,7 @@ def run(items: list[dict], now: datetime, model: str = MODEL) -> None:
         elif response.stop_reason == "max_tokens":
             print("\n[Report truncated at the output-token limit.]", file=sys.stderr)
         print()
-        return
+        return "".join(report_parts)
 
 
 def main() -> None:
@@ -160,23 +188,25 @@ def main() -> None:
     parser.add_argument("--item", type=int, metavar="ID",
                         help="analyze a single item by id")
     parser.add_argument("--model", default=MODEL)
+    parser.add_argument("--no-save", action="store_true",
+                        help="print the report only; don't save it to the pastebin")
     args = parser.parse_args()
 
     db.init_db()
     now = db.now_utc()
-    items = db.get_items()
-    if args.item is not None:
-        items = [item for item in items if item["id"] == args.item]
-        if not items:
-            sys.exit(f"No item with id {args.item}.")
-    elif not args.all:
-        items = [item for item in items if not item["processed"]]
-
+    items = triage_candidates(db.get_items(), include_processed=args.all,
+                              item_id=args.item)
     if not items:
+        if args.item is not None:
+            sys.exit(f"No triageable item with id {args.item}.")
         print("No items to triage.")
         return
 
-    run(items, now, model=args.model)
+    report = run(items, now, model=args.model)
+    if report.strip() and not args.no_save:
+        item_id = save_report(report, db.now_utc())
+        print(f"\nSaved report to the pastebin (item {item_id}, "
+              f"expires in {REPORT_TTL.days} day).", file=sys.stderr)
 
 
 if __name__ == "__main__":
